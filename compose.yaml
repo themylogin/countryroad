@@ -1,0 +1,30 @@
+services:
+  builder:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - dist:/dist
+
+  web:
+    image: nginx:stable-alpine
+    depends_on:
+      builder:
+        condition: service_completed_successfully
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - type: volume
+        source: dist
+        target: /usr/share/nginx/html
+        read_only: true
+        volume:
+          nocopy: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  dist:

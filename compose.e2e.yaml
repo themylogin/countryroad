@@ -1,0 +1,15 @@
+services:
+  web:
+    ports: !reset []
+
+  e2e:
+    build:
+      context: .
+      target: e2e
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://web/
+    ipc: host
+    init: true
