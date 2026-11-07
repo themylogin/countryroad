@@ -121,7 +121,7 @@ describe('overtake start', () => {
     const other = world.spawn('car', 1, 5075, kmh(90));
     other.phase = 'passing';
     other.lateral = 1;
-    other.maneuver = { speed: kmh(90), plannedEnd: 20, limit: 6, behindTime: 2, aheadTime: 3, passedIds: [], laneChangeSteps: 0 };
+    other.maneuver = { speed: kmh(90), plannedEnd: 20, limit: 6, behindTime: 2, aheadTime: 3, passedIds: [], lastPassedId: -1, laneChangeSteps: 0 };
     let startedWhileBusy = false;
     const events = runFor(world, 40, (stepEvents) => {
       if (startsOf(stepEvents, car).length > 0 && other.maneuver !== null) {
@@ -511,4 +511,220 @@ describe('user return gaps and braking room', () => {
     expect(userFinishes).toBeGreaterThan(0);
     expect(violations).toEqual([]);
   }, 120_000);
+});
+
+describe('return slot choice', () => {
+  const QUEUE_GAP = 0.5 + 3 * kmh(65);
+
+  function queueScene(settings: Partial<UserSettings>): { world: World; carA: Vehicle; carB: Vehicle; truck: Vehicle } {
+    const world = new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings(settings) });
+    world.user.y = 0;
+    world.user.speed = kmh(65);
+    const carA = world.spawn('car', 1, kmh(65) * world.userSettings.followingTime + 4.5, kmh(65));
+    const carB = world.spawn('car', 1, carA.y + QUEUE_GAP + 4.5, kmh(65));
+    const truck = world.spawn('slowTruck', 1, carB.y + QUEUE_GAP + 9, kmh(65));
+    for (const vehicle of [carA, carB, truck]) {
+      vehicle.nextPlanTime = Infinity;
+    }
+    return { world, carA, carB, truck };
+  }
+
+  it('cuts in after one car of a queue at a lower speed, with room to brake', () => {
+    const { world, carA, carB } = queueScene({
+      speed: kmh(180),
+      followingTime: 1,
+      overtakingSpeed: kmh(130),
+      oncomingGap: 1,
+      returnFollowingTime: 0.5,
+      cutInGap: 0.5,
+    });
+    world.spawn('car', -1, 600, kmh(90));
+    let chosenSpeed = 0;
+    let finish: OvertakeFinishEvent | undefined;
+    let behindAtFinish: Vehicle | undefined;
+    let aheadAtFinish: Vehicle | undefined;
+    let roomAtFinish = 0;
+    let neededAtFinish = 0;
+    runFor(world, 30, (events) => {
+      if (startsOf(events, world.user).length > 0 && world.user.maneuver !== null && chosenSpeed === 0) {
+        chosenSpeed = world.user.maneuver.speed;
+      }
+      const [justFinished] = finishesOf(events, world.user);
+      if (justFinished !== undefined && finish === undefined) {
+        finish = justFinished;
+        behindAtFinish = world.homeLaneFollower(world.user)?.vehicle;
+        const ahead = world.homeLaneLeader(world.user);
+        aheadAtFinish = ahead?.vehicle;
+        roomAtFinish = ahead?.gap ?? 0;
+        neededAtFinish = brakingRoom(world.user.speed, ahead?.vehicle.speed ?? 0);
+        world.user.nextPlanTime = Infinity;
+      }
+    });
+    if (finish === undefined) {
+      throw new Error('the user car did not overtake');
+    }
+    expect(behindAtFinish).toBe(carA);
+    expect(aheadAtFinish).toBe(carB);
+    expect(finish.gapBehind).toBeGreaterThanOrEqual(0.5);
+    expect(finish.gapAhead).toBeGreaterThanOrEqual(0.5);
+    expect(chosenSpeed).toBeLessThan(kmh(130));
+    expect(chosenSpeed).toBeGreaterThan(kmh(65));
+    expect(roomAtFinish).toBeGreaterThanOrEqual(neededAtFinish);
+  });
+
+  it('passes the whole queue at the highest overtaking speed when no gap fits', () => {
+    const { world, truck } = queueScene({ speed: kmh(130), overtakingSpeed: kmh(130) });
+    let chosenSpeed = 0;
+    let passedCount = 0;
+    const events = runFor(world, 60, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null && chosenSpeed === 0) {
+        chosenSpeed = world.user.maneuver.speed;
+        passedCount = world.user.maneuver.passedIds.length;
+      }
+      if (finishesOf(stepEvents, world.user).length > 0) {
+        expect(world.homeLaneFollower(world.user)?.vehicle).toBe(truck);
+        world.user.nextPlanTime = Infinity;
+      }
+    });
+    expect(finishesOf(events, world.user)).toHaveLength(1);
+    expect(chosenSpeed).toBeCloseTo(kmh(130), 9);
+    expect(passedCount).toBe(3);
+  });
+
+  it('lets a traffic car behind the same queue overtake only at 90 km/h', () => {
+    const { world, carA } = queueScene({ speed: kmh(80) });
+    world.user.y = 5000;
+    const follower = world.spawn('car', 1, carA.y - carA.length - QUEUE_GAP, kmh(65));
+    const speeds: number[] = [];
+    runFor(world, 90, (events) => {
+      if (startsOf(events, follower).length > 0 && follower.maneuver !== null) {
+        speeds.push(follower.maneuver.speed);
+      }
+    });
+    for (const speed of speeds) {
+      expect(speed).toBeCloseTo(kmh(90), 9);
+    }
+  });
+});
+
+describe('whole queue and no early return', () => {
+  const QUEUE_SPEED_65 = kmh(65);
+  const QUEUE_GAP = 0.5 + 3 * kmh(65);
+  const TIGHT = {
+    speed: kmh(180),
+    followingTime: 1,
+    overtakingSpeed: kmh(130),
+    oncomingGap: 1,
+    returnFollowingTime: 0.5,
+    cutInGap: 0.5,
+  };
+
+  function queue(world: World, cars: number): Vehicle[] {
+    world.user.y = 0;
+    world.user.speed = QUEUE_SPEED_65;
+    const vehicles: Vehicle[] = [];
+    let front = QUEUE_SPEED_65 * world.userSettings.followingTime + 4.5;
+    for (let index = 0; index < cars; index += 1) {
+      vehicles.push(world.spawn('car', 1, front, QUEUE_SPEED_65));
+      front += QUEUE_GAP + 4.5;
+    }
+    vehicles.push(world.spawn('slowTruck', 1, front + 4.5, QUEUE_SPEED_65));
+    for (const vehicle of vehicles) {
+      vehicle.nextPlanTime = Infinity;
+    }
+    return vehicles;
+  }
+
+  function tightWorld(): World {
+    return new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings(TIGHT) });
+  }
+
+  it('passes a whole queue of four cars and a slow truck in one overtake on a clear road', () => {
+    const world = tightWorld();
+    const vehicles = queue(world, 4);
+    const truck = vehicles[vehicles.length - 1];
+    const plannedCounts: number[] = [];
+    const events = runFor(world, 90, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null) {
+        plannedCounts.push(world.user.maneuver.passedIds.length);
+      }
+      if (finishesOf(stepEvents, world.user).length > 0) {
+        expect(world.homeLaneFollower(world.user)?.vehicle).toBe(truck);
+        world.user.nextPlanTime = Infinity;
+      }
+    });
+    expect(plannedCounts).toEqual([5]);
+    expect(finishesOf(events, world.user)).toHaveLength(1);
+  });
+
+  it('passes only the slow truck when a faster car drives just ahead of it', () => {
+    const world = tightWorld();
+    world.user.y = 0;
+    world.user.speed = QUEUE_SPEED_65;
+    const truck = world.spawn('slowTruck', 1, QUEUE_SPEED_65 + 9, QUEUE_SPEED_65);
+    const car = world.spawn('car', 1, truck.y + 70 + 4.5, kmh(90));
+    car.nextPlanTime = Infinity;
+    const plannedCounts: number[] = [];
+    runFor(world, 30, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null) {
+        plannedCounts.push(world.user.maneuver.passedIds.length);
+      }
+    });
+    expect(plannedCounts[0]).toBe(1);
+  });
+
+  it('returns in front of the slow truck and leaves a car 1 km beyond the queue ahead', () => {
+    const world = tightWorld();
+    const vehicles = queue(world, 2);
+    const truck = vehicles[vehicles.length - 1];
+    const farCar = world.spawn('car', 1, truck.y + 1000 + 4.5, kmh(90));
+    farCar.nextPlanTime = Infinity;
+    let behind: Vehicle | undefined;
+    let plannedCount = 0;
+    runFor(world, 60, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null && plannedCount === 0) {
+        plannedCount = world.user.maneuver.passedIds.length;
+      }
+      if (finishesOf(stepEvents, world.user).length > 0 && behind === undefined) {
+        behind = world.homeLaneFollower(world.user)?.vehicle;
+        world.user.nextPlanTime = Infinity;
+      }
+    });
+    expect(plannedCount).toBe(3);
+    expect(behind).toBe(truck);
+    expect(forwardDistance(world.user.y, farCar.y, 1)).toBeLessThan(5000);
+  });
+
+  it('stays in the passing lane until it has passed every planned vehicle, even when an earlier gap fits', () => {
+    const world = new World({
+      seed: 1,
+      counts: { car: 0, semi: 0, slowTruck: 0 },
+      user: userSettings({ ...TIGHT, speed: kmh(100), overtakingSpeed: kmh(100) }),
+    });
+    world.user.y = 0;
+    world.user.speed = QUEUE_SPEED_65;
+    const carA = world.spawn('car', 1, QUEUE_SPEED_65 + 4.5, QUEUE_SPEED_65);
+    const carB = world.spawn('car', 1, carA.y + 70 + 4.5, QUEUE_SPEED_65);
+    const truck = world.spawn('slowTruck', 1, carB.y + QUEUE_GAP + 9, QUEUE_SPEED_65);
+    for (const vehicle of [carA, carB, truck]) {
+      vehicle.nextPlanTime = Infinity;
+    }
+    let backStartedBeforeTruck = false;
+    let plannedCount = 0;
+    let previousPhase = world.user.phase;
+    runFor(world, 60, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null && plannedCount === 0) {
+        plannedCount = world.user.maneuver.passedIds.length;
+      }
+      if (previousPhase === 'passing' && world.user.phase === 'back') {
+        backStartedBeforeTruck ||= forwardDistance(world.user.y, truck.y, 1) < 5000;
+      }
+      previousPhase = world.user.phase;
+      if (finishesOf(stepEvents, world.user).length > 0) {
+        world.user.nextPlanTime = Infinity;
+      }
+    });
+    expect(plannedCount).toBe(3);
+    expect(backStartedBeforeTruck).toBe(false);
+  });
 });

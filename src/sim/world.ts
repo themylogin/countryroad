@@ -24,6 +24,7 @@ export interface Maneuver {
   readonly behindTime: number;
   readonly aheadTime: number;
   readonly passedIds: readonly number[];
+  readonly lastPassedId: number;
   laneChangeSteps: number;
 }
 

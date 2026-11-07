@@ -28,6 +28,8 @@ const FALLBACK_GAP_AHEAD = 1;
 const RETURN_BRAKING = 3;
 const RETURN_BRAKING_STANDSTILL = 2;
 const PULL_OUT_MARGIN = 2;
+const CANDIDATE_SPEED_STEP = kmh(5);
+const QUEUE_GAP_MARGIN = 20;
 const INSERTION_ZONE_AHEAD = 3000;
 const INSERTION_ZONE_BEHIND = 200;
 const INSERTION_ZONE_MARGIN = 500;
@@ -144,42 +146,121 @@ export function speedBounds(world: World, vehicle: Vehicle): SpeedBounds {
   return { low: Math.max(0, low - SPEED_ALLOWANCE), high: own + SPEED_ALLOWANCE };
 }
 
+export function candidateSpeeds(car: Vehicle, highest: number, passedHigh: number): number[] {
+  const floor = passedHigh + 0.05;
+  if (highest <= floor || highest < car.speed) {
+    return [];
+  }
+  if (car.kind !== 'user') {
+    return [highest];
+  }
+  const speeds: number[] = [];
+  for (let speed = highest; speed > floor && speed >= car.speed; speed -= CANDIDATE_SPEED_STEP) {
+    speeds.push(speed);
+  }
+  return speeds;
+}
+
+interface PlanContext {
+  readonly highest: number;
+  readonly limit: number;
+  readonly behindTime: number;
+  readonly aheadTime: number;
+  readonly entries: readonly QueueEntry[];
+  readonly complete: boolean;
+}
+
+type SlotResult =
+  | { readonly kind: 'plan'; readonly plan: OvertakePlan }
+  | { readonly kind: 'cannotPass' }
+  | { readonly kind: 'noFit' }
+  | { readonly kind: 'blocked' };
+
+export function queueEnd(world: World, entries: readonly QueueEntry[]): number {
+  let end = 0;
+  while (end + 1 < entries.length) {
+    const current = entries[end];
+    const next = entries[end + 1];
+    const gap = next.distance - next.vehicle.length - current.distance;
+    const tooFar = gap > current.vehicle.followingTime * current.vehicle.speed + QUEUE_GAP_MARGIN;
+    const notSlower = next.vehicle.speed >= world.effectiveDesiredSpeed(current.vehicle) - CONSTRAINED_SPEED_MARGIN;
+    if (tooFar || notSlower) {
+      break;
+    }
+    end += 1;
+  }
+  return end;
+}
+
 export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
-  const speed = overtakingSpeed(world, car);
-  const motion = acceleratingMotion(car.speed, speed, car.maxAcceleration);
-  const limit = oncomingLimit(world, car);
-  const { behindTime, aheadTime } = returnGaps(world, car);
-  if (!oncomingClear(world, car, motion, 2 * LANE_CHANGE_SECONDS, limit)) {
+  const { entries, complete } = homeQueue(world, car);
+  const first = entries[0];
+  if (first === undefined) {
     return null;
   }
-  const { entries, complete } = homeQueue(world, car);
-  if (!pullOutClear(world, entries[0], motion)) {
+  const context: PlanContext = {
+    highest: overtakingSpeed(world, car),
+    limit: oncomingLimit(world, car),
+    ...returnGaps(world, car),
+    entries,
+    complete,
+  };
+  const firstCandidates = candidateSpeeds(car, context.highest, speedBounds(world, first.vehicle).high);
+  const slowest = firstCandidates[firstCandidates.length - 1];
+  if (slowest === undefined) {
+    return null;
+  }
+  const slowestMotion = acceleratingMotion(car.speed, slowest, car.maxAcceleration);
+  if (!oncomingClear(world, car, slowestMotion, 2 * LANE_CHANGE_SECONDS, context.limit)) {
+    return null;
+  }
+  if (car.kind === 'user') {
+    for (let index = queueEnd(world, entries); index >= 0; index -= 1) {
+      const result = planSlot(world, car, context, index);
+      if (result.kind === 'plan') {
+        return result.plan;
+      }
+    }
     return null;
   }
   for (let index = 0; index < entries.length; index += 1) {
-    const passed = entries[index];
-    const passedHigh = speedBounds(world, passed.vehicle).high;
-    if (speed <= passedHigh + 0.05) {
+    const result = planSlot(world, car, context, index);
+    if (result.kind === 'plan') {
+      return result.plan;
+    }
+    if (result.kind !== 'noFit') {
       return null;
     }
-    const clearNeed = passed.distance + car.length + DISTANCE_MARGIN;
-    const clearTime = earliestTime((time) => motion.distance(time) - passedHigh * time - clearNeed);
-    const gapTime = earliestTime(
-      (time) => motion.distance(time) - passedHigh * time - clearNeed - behindTime * passedHigh,
-    );
-    if (clearTime === null || gapTime === null) {
-      return null;
+  }
+  return null;
+}
+
+function planSlot(world: World, car: Vehicle, context: PlanContext, index: number): SlotResult {
+  const { entries, complete, highest, limit, behindTime, aheadTime } = context;
+  const passed = entries[index];
+  const passedHigh = speedBounds(world, passed.vehicle).high;
+  const candidates = candidateSpeeds(car, highest, passedHigh);
+  if (candidates.length === 0) {
+    return { kind: 'cannotPass' };
+  }
+  const next = entries[index + 1];
+  if (next === undefined && !complete) {
+    return { kind: 'blocked' };
+  }
+  let nextLow = 0;
+  if (next !== undefined) {
+    nextLow = speedBounds(world, next.vehicle).low;
+  }
+  for (const speed of candidates) {
+    const motion = acceleratingMotion(car.speed, speed, car.maxAcceleration);
+    if (!pullOutClear(world, entries[0], motion)) {
+      continue;
     }
-    const end = Math.max(gapTime, clearTime + LANE_CHANGE_SECONDS, 2 * LANE_CHANGE_SECONDS);
-    if (end > MAX_MANEUVER_SECONDS) {
-      return null;
-    }
-    const next = entries[index + 1];
-    if (next === undefined && !complete) {
-      return null;
+    const end = returnEnd(car, passed, passedHigh, behindTime, motion);
+    if (end === null) {
+      continue;
     }
     if (next !== undefined) {
-      const nextLow = speedBounds(world, next.vehicle).low;
       const gapAhead = next.distance - next.vehicle.length + nextLow * end - motion.distance(end);
       const speedAtEnd = motion.speed(end);
       const needed = Math.max(aheadTime * speedAtEnd, brakingRoom(speedAtEnd, nextLow));
@@ -188,21 +269,38 @@ export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
       }
     }
     if (!passingLaneFree(world, car, motion.distance(end), end)) {
-      return null;
+      return { kind: 'blocked' };
     }
     if (!oncomingClear(world, car, motion, end, limit)) {
-      return null;
+      return { kind: 'blocked' };
     }
     return {
-      speed,
-      end,
-      limit,
-      behindTime,
-      aheadTime,
-      passedIds: entries.slice(0, index + 1).map((entry) => entry.vehicle.id),
+      kind: 'plan',
+      plan: {
+        speed,
+        end,
+        limit,
+        behindTime,
+        aheadTime,
+        passedIds: entries.slice(0, index + 1).map((entry) => entry.vehicle.id),
+      },
     };
   }
-  return null;
+  return { kind: 'noFit' };
+}
+
+function returnEnd(car: Vehicle, passed: QueueEntry, passedHigh: number, behindTime: number, motion: Motion): number | null {
+  const clearNeed = passed.distance + car.length + DISTANCE_MARGIN;
+  const clearTime = earliestTime((time) => motion.distance(time) - passedHigh * time - clearNeed);
+  const gapTime = earliestTime((time) => motion.distance(time) - passedHigh * time - clearNeed - behindTime * passedHigh);
+  if (clearTime === null || gapTime === null) {
+    return null;
+  }
+  const end = Math.max(gapTime, clearTime + LANE_CHANGE_SECONDS, 2 * LANE_CHANGE_SECONDS);
+  if (end > MAX_MANEUVER_SECONDS) {
+    return null;
+  }
+  return end;
 }
 
 export function returnReady(world: World, car: Vehicle): boolean {
@@ -211,6 +309,9 @@ export function returnReady(world: World, car: Vehicle): boolean {
     return false;
   }
   const late = world.time > maneuver.plannedEnd - LANE_CHANGE_SECONDS + LATE_FALLBACK_SECONDS;
+  if (!late && !hasPassed(world, car, maneuver.lastPassedId)) {
+    return false;
+  }
   const motion = acceleratingMotion(car.speed, maneuver.speed, car.maxAcceleration);
   const advance = motion.distance(LANE_CHANGE_SECONDS);
   const follower = world.homeLaneFollower(car);
@@ -312,6 +413,7 @@ export const overtakingRules: OvertakingRules = {
       behindTime: plan.behindTime,
       aheadTime: plan.aheadTime,
       passedIds: plan.passedIds,
+      lastPassedId: plan.passedIds[plan.passedIds.length - 1],
       laneChangeSteps: 0,
     };
     vehicle.phase = 'out';
@@ -369,6 +471,14 @@ function finish(world: World, vehicle: Vehicle, events: WorldEvent[]): void {
     aheadLimit: maneuver.aheadTime,
     lateBy: world.time - maneuver.plannedEnd,
   });
+}
+
+function hasPassed(world: World, car: Vehicle, vehicleId: number): boolean {
+  const vehicle = world.vehicles.find((candidate) => candidate.id === vehicleId);
+  if (vehicle === undefined) {
+    return true;
+  }
+  return forwardDistance(car.y, vehicle.y, car.direction) > ROAD_LENGTH / 2;
 }
 
 function pullOutClear(world: World, ahead: QueueEntry | undefined, motion: Motion): boolean {
