@@ -1,5 +1,5 @@
 import { STEP } from './clock';
-import { followingAcceleration, nextSpeed, type Leader } from './following';
+import { followingAcceleration, nextRecovering, nextSpeed, recoveryAcceleration } from './following';
 import { overtakingRules } from './overtaking';
 import { createRandom, type Random } from './random';
 import { forwardDistance, relativePosition, ROAD_LENGTH, wrap, type Direction } from './road';
@@ -21,6 +21,8 @@ export interface Maneuver {
   readonly speed: number;
   readonly plannedEnd: number;
   readonly limit: number;
+  readonly behindTime: number;
+  readonly aheadTime: number;
   readonly passedIds: readonly number[];
   laneChangeSteps: number;
 }
@@ -31,7 +33,7 @@ export interface Vehicle {
   readonly direction: Direction;
   readonly length: number;
   readonly width: number;
-  readonly followingTime: number;
+  followingTime: number;
   readonly maxAcceleration: number;
   readonly comfortableBraking: number;
   desiredSpeed: number;
@@ -41,15 +43,24 @@ export interface Vehicle {
   phase: Phase;
   maneuver: Maneuver | null;
   nextPlanTime: number;
+  recovering: boolean;
 }
 
 export type TrafficCounts = Record<TrafficKind, number>;
 
+export interface UserSettings {
+  readonly speed: number;
+  readonly followingTime: number;
+  readonly overtakingSpeed: number;
+  readonly oncomingGap: number;
+  readonly returnFollowingTime: number;
+  readonly cutInGap: number;
+}
+
 export interface WorldOptions {
   readonly seed: number;
   readonly counts: TrafficCounts;
-  readonly userSpeed: number;
-  readonly userGap: number;
+  readonly user: UserSettings;
   readonly overtaking?: boolean;
 }
 
@@ -68,6 +79,8 @@ export interface OvertakeFinishEvent {
   readonly gapAhead: number | null;
   readonly timeToMeet: number | null;
   readonly limit: number;
+  readonly behindLimit: number;
+  readonly aheadLimit: number;
   readonly lateBy: number;
 }
 
@@ -88,8 +101,9 @@ export class World {
   time = 0;
   readonly vehicles: Vehicle[] = [];
   readonly user: Vehicle;
-  userGap: number;
-  requestedUserSpeed: number;
+  userSettings: UserSettings;
+  userDistance = 0;
+  userOvertakes = 0;
   overtakingRules: OvertakingRules | null = null;
   private readonly random: Random;
   private nextId = 0;
@@ -103,13 +117,13 @@ export class World {
 
   constructor(options: WorldOptions) {
     this.random = createRandom(options.seed);
-    this.userGap = options.userGap;
-    this.requestedUserSpeed = options.userSpeed;
+    this.userSettings = options.user;
     if (options.overtaking !== false) {
       this.overtakingRules = overtakingRules;
     }
     this.user = this.createVehicle('user', 1, 0, 0);
-    this.user.desiredSpeed = options.userSpeed;
+    this.user.desiredSpeed = options.user.speed;
+    this.user.followingTime = options.user.followingTime;
     this.placeInitial(options.counts);
   }
 
@@ -117,8 +131,9 @@ export class World {
     return this.vehicles.filter((vehicle) => vehicle.kind === kind && vehicle.direction === direction).length;
   }
 
-  setUserSpeed(speed: number): void {
-    this.requestedUserSpeed = speed;
+  setUser(change: Partial<UserSettings>): void {
+    this.userSettings = { ...this.userSettings, ...change };
+    this.user.followingTime = this.userSettings.followingTime;
     this.applyRequestedUserSpeed();
   }
 
@@ -127,10 +142,6 @@ export class World {
       return true;
     }
     return this.vehicles.some((vehicle) => vehicle.maneuver?.passedIds.includes(this.user.id) === true);
-  }
-
-  setUserGap(gap: number): void {
-    this.userGap = gap;
   }
 
   setCount(kind: TrafficKind, count: number): void {
@@ -224,6 +235,7 @@ export class World {
       vehicle.y = wrap(vehicle.y + vehicle.direction * vehicle.speed * STEP);
     });
     this.time += STEP;
+    this.userDistance += this.user.speed * STEP;
     this.sortOrdered();
     const rules = this.overtakingRules;
     if (rules !== null) {
@@ -235,6 +247,11 @@ export class World {
       }
     }
     this.applyRequestedUserSpeed();
+    for (const event of events) {
+      if (event.type === 'overtakeFinish' && event.vehicleId === this.user.id) {
+        this.userOvertakes += 1;
+      }
+    }
     if (this.time >= this.nextPendingTime) {
       this.nextPendingTime = this.time + PENDING_RETRY_INTERVAL;
       this.insertPending();
@@ -244,7 +261,7 @@ export class World {
 
   private applyRequestedUserSpeed(): void {
     if (!this.userInOvertake()) {
-      this.user.desiredSpeed = this.requestedUserSpeed;
+      this.user.desiredSpeed = this.userSettings.speed;
     }
   }
 
@@ -253,9 +270,15 @@ export class World {
       return Math.min(vehicle.maxAcceleration, (vehicle.maneuver.speed - vehicle.speed) / STEP);
     }
     const neighbor = this.homeLaneLeader(vehicle);
-    let leader: Leader | null = null;
-    if (neighbor !== null) {
-      leader = { gap: neighbor.gap, speed: neighbor.vehicle.speed };
+    if (neighbor === null) {
+      vehicle.recovering = false;
+      return followingAcceleration(vehicle, null);
+    }
+    const leader = { gap: neighbor.gap, speed: neighbor.vehicle.speed };
+    const timeGap = neighbor.gap / Math.max(vehicle.speed, 0.1);
+    vehicle.recovering = nextRecovering(vehicle.recovering, timeGap, vehicle.followingTime);
+    if (vehicle.recovering) {
+      return recoveryAcceleration(vehicle, leader);
     }
     return followingAcceleration(vehicle, leader);
   }
@@ -303,6 +326,7 @@ export class World {
       phase: 'cruise',
       maneuver: null,
       nextPlanTime: this.random() * 0.5,
+      recovering: false,
     };
     this.nextId += 1;
     this.vehicles.push(vehicle);

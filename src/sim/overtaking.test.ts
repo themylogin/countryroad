@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { isConstrained, LANE_CHANGE_SECONDS, planOvertake } from './overtaking';
+import { brakingRoom, isConstrained, LANE_CHANGE_SECONDS, planOvertake } from './overtaking';
 import { forwardDistance } from './road';
+import { userSettings } from './test-support';
 import { kmh } from './vehicle-types';
 import {
   STEP,
   World,
   type OvertakeFinishEvent,
   type OvertakeStartEvent,
+  type UserSettings,
   type Vehicle,
   type WorldEvent,
 } from './world';
@@ -14,7 +16,7 @@ import {
 const QUEUE_SPEED = kmh(65);
 
 function emptyWorld(userGap = 6, userSpeed = kmh(80)): World {
-  return new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, userSpeed, userGap });
+  return new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings({ speed: userSpeed, oncomingGap: userGap }) });
 }
 
 function runFor(world: World, seconds: number, onStep: (events: WorldEvent[]) => void = () => {}): WorldEvent[] {
@@ -119,7 +121,7 @@ describe('overtake start', () => {
     const other = world.spawn('car', 1, 5075, kmh(90));
     other.phase = 'passing';
     other.lateral = 1;
-    other.maneuver = { speed: kmh(90), plannedEnd: 20, limit: 6, passedIds: [], laneChangeSteps: 0 };
+    other.maneuver = { speed: kmh(90), plannedEnd: 20, limit: 6, behindTime: 2, aheadTime: 3, passedIds: [], laneChangeSteps: 0 };
     let startedWhileBusy = false;
     const events = runFor(world, 40, (stepEvents) => {
       if (startsOf(stepEvents, car).length > 0 && other.maneuver !== null) {
@@ -219,7 +221,7 @@ describe('user car', () => {
   });
 
   it('allows every 6.0 s overtake at 1.0 s too, and some only at 1.0 s, in the same situations', () => {
-    const world = new World({ seed: 5, counts: { car: 15, semi: 3, slowTruck: 2 }, userSpeed: kmh(130), userGap: 6 });
+    const world = new World({ seed: 5, counts: { car: 15, semi: 3, slowTruck: 2 }, user: userSettings({ speed: kmh(130), oncomingGap: 6 }) });
     let bothOrNeither = 0;
     let onlyAtOne = 0;
     let onlyAtSix = 0;
@@ -228,11 +230,11 @@ describe('user car', () => {
       if (world.user.phase !== 'cruise' || !isConstrained(world, world.user)) {
         continue;
       }
-      world.setUserGap(6);
+      world.setUser({ oncomingGap: 6 });
       const careful = planOvertake(world, world.user) !== null;
-      world.setUserGap(1);
+      world.setUser({ oncomingGap: 1 });
       const bold = planOvertake(world, world.user) !== null;
-      world.setUserGap(6);
+      world.setUser({ oncomingGap: 6 });
       if (careful && !bold) {
         onlyAtSix += 1;
       } else if (bold && !careful) {
@@ -260,7 +262,7 @@ describe('user car', () => {
         largestDrop = Math.max(largestDrop, previousSpeed - world.user.speed);
       }
       if (startsOf(events, world.user).length > 0) {
-        world.setUserSpeed(kmh(100));
+        world.setUser({ speed: kmh(100) });
         lowered = true;
       }
       previousSpeed = world.user.speed;
@@ -291,7 +293,7 @@ describe('user speed changes during an overtake', () => {
         expect(world.user.desiredSpeed).toBeCloseTo(kmh(130), 9);
       }
       if (startsOf(events, world.user).length > 0) {
-        world.setUserSpeed(kmh(180));
+        world.setUser({ speed: kmh(180) });
         raised = true;
       }
       if (finishesOf(events, world.user).length > 0) {
@@ -317,7 +319,7 @@ describe('user speed changes during an overtake', () => {
         heldWhilePassed = false;
       }
       if (startsOf(stepEvents, passer).length > 0) {
-        world.setUserSpeed(kmh(180));
+        world.setUser({ speed: kmh(180) });
         raised = true;
       }
     });
@@ -348,4 +350,165 @@ describe('insertion during an overtake', () => {
       expect(10_000 - ahead).toBeGreaterThan(200);
     }
   });
+});
+
+describe('user overtaking settings', () => {
+  function userBehindSemi(settings: Partial<UserSettings>): World {
+    const world = new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings(settings) });
+    world.user.y = 0;
+    world.user.speed = kmh(80);
+    world.spawn('semi', 1, 3 * kmh(80) + 16.5, kmh(80));
+    return world;
+  }
+
+  it('passes at the overtaking speed when it is above my speed, then slows back', () => {
+    const world = userBehindSemi({ speed: kmh(100), overtakingSpeed: kmh(150) });
+    let maneuverSpeed = 0;
+    let fastest = 0;
+    const events = runFor(world, 60, () => {
+      if (world.user.maneuver !== null) {
+        maneuverSpeed = world.user.maneuver.speed;
+        fastest = Math.max(fastest, world.user.speed);
+      }
+    });
+    expect(finishesOf(events, world.user)).toHaveLength(1);
+    expect(maneuverSpeed).toBeCloseTo(kmh(150), 9);
+    expect(fastest).toBeGreaterThan(kmh(140));
+    expect(fastest).toBeLessThanOrEqual(kmh(150) + 1e-9);
+    expect(world.user.desiredSpeed).toBeCloseTo(kmh(100), 9);
+    expect(world.user.speed).toBeLessThanOrEqual(kmh(100) + 0.1);
+  });
+
+  it('passes at my speed when the overtaking speed is lower', () => {
+    const world = userBehindSemi({ speed: kmh(130), overtakingSpeed: kmh(100) });
+    let maneuverSpeed = 0;
+    runFor(world, 30, () => {
+      if (world.user.maneuver !== null) {
+        maneuverSpeed = world.user.maneuver.speed;
+      }
+    });
+    expect(maneuverSpeed).toBeCloseTo(kmh(130), 9);
+  });
+
+  it('keeps a running overtake on its old settings and uses new settings for the next one', () => {
+    const world = userBehindSemi({ speed: kmh(100), overtakingSpeed: kmh(130) });
+    world.spawn('slowTruck', 1, 1000, kmh(65));
+    const startSpeeds: number[] = [];
+    let changed = false;
+    const events = runFor(world, 180, (stepEvents) => {
+      if (startsOf(stepEvents, world.user).length > 0 && world.user.maneuver !== null) {
+        startSpeeds.push(world.user.maneuver.speed);
+        if (!changed) {
+          world.setUser({ overtakingSpeed: kmh(160), oncomingGap: 2, returnFollowingTime: 1, cutInGap: 1 });
+          changed = true;
+        }
+      }
+    });
+    const finishes = finishesOf(events, world.user);
+    expect(finishes.length).toBeGreaterThanOrEqual(2);
+    expect(startSpeeds[0]).toBeCloseTo(kmh(130), 9);
+    expect(finishes[0].limit).toBe(6);
+    expect(finishes[0].behindLimit).toBe(2);
+    expect(finishes[0].aheadLimit).toBe(2);
+    expect(startSpeeds[1]).toBeCloseTo(kmh(160), 9);
+    expect(finishes[1].limit).toBe(2);
+    expect(finishes[1].behindLimit).toBe(1);
+    expect(finishes[1].aheadLimit).toBe(1);
+  });
+});
+
+describe('user return gaps and braking room', () => {
+  function userScene(settings: Partial<UserSettings>): World {
+    const world = new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings(settings) });
+    world.user.y = 0;
+    world.user.speed = kmh(65);
+    return world;
+  }
+
+  it('returns with at least 2.0 s behind and ahead at the default settings', () => {
+    const world = userScene({});
+    world.spawn('slowTruck', 1, 60 + 9, kmh(65));
+    world.spawn('car', 1, 69 + 140 + 4.5, kmh(90)).nextPlanTime = Infinity;
+    const events = runFor(world, 40);
+    const [finish] = finishesOf(events, world.user);
+    expect(finish).toBeDefined();
+    expect(finish.behindLimit).toBe(2);
+    expect(finish.aheadLimit).toBe(2);
+    expect(finish.gapBehind).toBeGreaterThanOrEqual(2);
+    expect(finish.gapAhead).toBeGreaterThanOrEqual(2);
+  });
+
+  it('returns with 0.5 s gaps and then recovers its driving following distance', () => {
+    const world = userScene({ returnFollowingTime: 0.5, cutInGap: 0.5 });
+    const truck = world.spawn('slowTruck', 1, 60 + 9, kmh(65));
+    const car = world.spawn('car', 1, 69 + 70 + 4.5, kmh(90));
+    car.nextPlanTime = Infinity;
+    let finish: OvertakeFinishEvent | undefined;
+    let recoveredAfterFinish = false;
+    let bestTimeGapAfterFinish = 0;
+    runFor(world, 90, (events) => {
+      const [justFinished] = finishesOf(events, world.user);
+      if (justFinished !== undefined && finish === undefined) {
+        finish = justFinished;
+        world.user.nextPlanTime = Infinity;
+      }
+      if (finish !== undefined) {
+        recoveredAfterFinish ||= world.user.recovering;
+        const leader = world.homeLaneLeader(world.user);
+        if (leader !== null) {
+          bestTimeGapAfterFinish = Math.max(bestTimeGapAfterFinish, leader.gap / world.user.speed);
+        }
+      }
+    });
+    if (finish === undefined) {
+      throw new Error('the user car did not overtake');
+    }
+    expect(finish.behindLimit).toBe(0.5);
+    expect(finish.aheadLimit).toBe(0.5);
+    expect(finish.gapBehind).toBeGreaterThanOrEqual(0.5);
+    expect(finish.gapAhead).toBeGreaterThanOrEqual(0.5);
+    expect(finish.gapAhead).toBeLessThan(3);
+    expect(recoveredAfterFinish).toBe(true);
+    expect(bestTimeGapAfterFinish).toBeGreaterThanOrEqual(3);
+    expect(truck.direction).toBe(1);
+  });
+
+  it('skips a slot that leaves no room to brake from 180 km/h to a slow truck', () => {
+    const world = userScene({ speed: kmh(180), overtakingSpeed: kmh(180), returnFollowingTime: 0.5, cutInGap: 0.5 });
+    const first = world.spawn('slowTruck', 1, 60 + 9, kmh(65));
+    const second = world.spawn('slowTruck', 1, 69 + 120 + 9, kmh(65));
+    const events = runFor(world, 40);
+    const [finish] = finishesOf(events, world.user);
+    expect(finish).toBeDefined();
+    expect(world.homeLaneFollower(world.user)?.vehicle).toBe(second);
+    expect(world.homeLaneFollower(world.user)?.vehicle).not.toBe(first);
+  });
+
+  it('never returns closer than the braking room in a long run at the tightest settings', () => {
+    const world = new World({
+      seed: 3,
+      counts: { car: 15, semi: 3, slowTruck: 2 },
+      user: userSettings({
+        speed: kmh(80),
+        followingTime: 1,
+        overtakingSpeed: kmh(180),
+        oncomingGap: 1,
+        returnFollowingTime: 0.5,
+        cutInGap: 0.5,
+      }),
+    });
+    const violations: string[] = [];
+    let userFinishes = 0;
+    runFor(world, 20 * 60, (events) => {
+      for (const event of finishesOf(events, world.user)) {
+        userFinishes += 1;
+        const leader = world.homeLaneLeader(world.user);
+        if (leader !== null && leader.gap < brakingRoom(world.user.speed, leader.vehicle.speed) - 1) {
+          violations.push(`t=${event.time.toFixed(1)} gap ${leader.gap.toFixed(1)} m`);
+        }
+      }
+    });
+    expect(userFinishes).toBeGreaterThan(0);
+    expect(violations).toEqual([]);
+  }, 120_000);
 });

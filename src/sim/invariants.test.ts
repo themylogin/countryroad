@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { InvariantMonitor } from './invariants';
 import { kmh } from './vehicle-types';
 import { STEP, World } from './world';
+import { userSettings } from './test-support';
 
 describe('invariants without overtaking', () => {
   it('keeps footprints apart and speeds within limits at maximum counts for 20 minutes', () => {
     const world = new World({
       seed: 11,
       counts: { car: 100, semi: 20, slowTruck: 10 },
-      userSpeed: kmh(180),
-      userGap: 1,
+      user: userSettings({ speed: kmh(180), oncomingGap: 1 }),
       overtaking: false,
     });
     const monitor = new InvariantMonitor(world);
@@ -24,8 +24,7 @@ describe('invariants without overtaking', () => {
     const world = new World({
       seed: 3,
       counts: { car: 1, semi: 0, slowTruck: 0 },
-      userSpeed: kmh(130),
-      userGap: 6,
+      user: userSettings({ speed: kmh(130), oncomingGap: 6 }),
       overtaking: false,
     });
     const car = world.vehicles.find((vehicle) => vehicle.kind === 'car' && vehicle.direction === 1);

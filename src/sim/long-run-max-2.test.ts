@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { runLong } from './invariants';
 import { kmh } from './vehicle-types';
+import { userSettings } from './test-support';
 
 const SEEDS = [6, 7, 8, 9, 10];
 
 describe('20 simulated minutes at maximum counts, user at 180 km/h with a 1.0 s gap', () => {
   for (const seed of SEEDS) {
     it(`seed ${seed} keeps every invariant and every overtake rule`, () => {
-      const result = runLong({ seed, counts: { car: 100, semi: 20, slowTruck: 10 }, userSpeed: kmh(180), userGap: 1 }, 20 * 60);
+      const result = runLong({ seed, counts: { car: 100, semi: 20, slowTruck: 10 }, user: userSettings({ speed: kmh(180), oncomingGap: 1 }) }, 20 * 60);
       expect(result.violations).toEqual([]);
       expect(result.badReturns).toEqual([]);
     }, 300_000);

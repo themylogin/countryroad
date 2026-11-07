@@ -1,4 +1,3 @@
-import { GAP_AHEAD, GAP_BEHIND } from './overtaking';
 import { ROAD_LENGTH, wrap } from './road';
 import { MAX_BRAKING } from './vehicle-types';
 import { STEP, World, type Vehicle, type WorldOptions } from './world';
@@ -17,6 +16,7 @@ const MAX_REPORTED = 20;
 export class InvariantMonitor {
   readonly violations: string[] = [];
   private readonly previousSpeeds = new Map<Vehicle, number>();
+  private readonly previousLimits = new Map<Vehicle, number>();
 
   constructor(private readonly world: World) {
     this.remember();
@@ -68,12 +68,16 @@ export class InvariantMonitor {
   private checkSpeeds(): void {
     for (const vehicle of this.world.vehicles) {
       const limit = this.world.effectiveDesiredSpeed(vehicle);
-      if (vehicle.speed > limit + TOLERANCE) {
-        this.report(`${describe(vehicle)} drives ${vehicle.speed.toFixed(3)} m/s above its limit ${limit.toFixed(3)} m/s`);
-      }
       const previous = this.previousSpeeds.get(vehicle);
       if (previous === undefined) {
+        if (vehicle.speed > limit + TOLERANCE) {
+          this.report(`${describe(vehicle)} starts at ${vehicle.speed.toFixed(3)} m/s above its limit ${limit.toFixed(3)} m/s`);
+        }
         continue;
+      }
+      const stepLimit = Math.max(limit, this.previousLimits.get(vehicle) ?? limit);
+      if (vehicle.speed > stepLimit + TOLERANCE && vehicle.speed > previous + TOLERANCE) {
+        this.report(`${describe(vehicle)} speeds up to ${vehicle.speed.toFixed(3)} m/s above its limit ${stepLimit.toFixed(3)} m/s`);
       }
       const acceleration = (vehicle.speed - previous) / STEP;
       if (acceleration > vehicle.maxAcceleration + TOLERANCE) {
@@ -87,8 +91,10 @@ export class InvariantMonitor {
 
   private remember(): void {
     this.previousSpeeds.clear();
+    this.previousLimits.clear();
     for (const vehicle of this.world.vehicles) {
       this.previousSpeeds.set(vehicle, vehicle.speed);
+      this.previousLimits.set(vehicle, this.world.effectiveDesiredSpeed(vehicle));
     }
   }
 }
@@ -146,10 +152,10 @@ export function runLong(options: WorldOptions, seconds: number): LongRunResult {
       }
       finishes += 1;
       const problems: string[] = [];
-      if (event.gapBehind !== null && event.gapBehind < GAP_BEHIND - TOLERANCE) {
+      if (event.gapBehind !== null && event.gapBehind < event.behindLimit - TOLERANCE) {
         problems.push(`gap behind ${event.gapBehind.toFixed(2)} s`);
       }
-      if (event.gapAhead !== null && event.gapAhead < GAP_AHEAD - TOLERANCE) {
+      if (event.gapAhead !== null && event.gapAhead < event.aheadLimit - TOLERANCE) {
         problems.push(`gap ahead ${event.gapAhead.toFixed(2)} s`);
       }
       if (event.timeToMeet !== null && event.timeToMeet < event.limit - TOLERANCE) {

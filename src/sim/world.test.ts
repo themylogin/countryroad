@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { forwardDistance, type Direction } from './road';
 import { kmh, TRAFFIC_KINDS } from './vehicle-types';
 import { DIRECTIONS, STEP, World, type TrafficCounts, type Vehicle } from './world';
+import { userSettings } from './test-support';
 
 const DEFAULT_COUNTS: TrafficCounts = { car: 15, semi: 3, slowTruck: 2 };
 const MAX_COUNTS: TrafficCounts = { car: 100, semi: 20, slowTruck: 10 };
 
 function createWorld(counts: TrafficCounts, seed = 1): World {
-  return new World({ seed, counts, userSpeed: kmh(130), userGap: 6, overtaking: false });
+  return new World({ seed, counts, user: userSettings({ speed: kmh(130), oncomingGap: 6 }), overtaking: false });
 }
 
 function run(world: World, seconds: number): void {
@@ -175,5 +176,42 @@ describe('count changes', () => {
     for (const direction of DIRECTIONS) {
       expect(world.countOf('slowTruck', direction)).toBe(9);
     }
+  });
+});
+
+describe('trip counters', () => {
+  it('adds the distance that the user car drives', () => {
+    const world = createWorld({ car: 0, semi: 0, slowTruck: 0 });
+    run(world, 60);
+    expect(world.userDistance).toBeCloseTo(60 * kmh(130), 3);
+  });
+
+  it('counts each finished overtake of the user car once', () => {
+    const world = new World({ seed: 1, counts: { car: 0, semi: 0, slowTruck: 0 }, user: userSettings() });
+    world.user.y = 0;
+    world.user.speed = kmh(65);
+    world.spawn('slowTruck', 1, 69, kmh(65));
+    world.spawn('slowTruck', 1, 1500, kmh(65));
+    let finishes = 0;
+    for (let step = 0; step < Math.round(120 / STEP); step += 1) {
+      finishes += world
+        .step()
+        .filter((event) => event.type === 'overtakeFinish' && event.vehicleId === world.user.id).length;
+    }
+    expect(finishes).toBeGreaterThanOrEqual(2);
+    expect(world.userOvertakes).toBe(finishes);
+  });
+
+  it('changes nothing while no step runs', () => {
+    const world = createWorld(DEFAULT_COUNTS);
+    run(world, 10);
+    const distance = world.userDistance;
+    const overtakes = world.userOvertakes;
+    const time = world.time;
+    world.setCount('car', 30);
+    world.setUser({ speed: kmh(90) });
+    expect(world.userDistance).toBe(distance);
+    expect(world.userOvertakes).toBe(overtakes);
+    expect(world.time).toBe(time);
   });
 });

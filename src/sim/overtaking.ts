@@ -1,12 +1,13 @@
 import { STEP } from './clock';
+import { recoveryTarget } from './following';
 import { forwardDistance, ROAD_LENGTH, type Direction } from './road';
 import { kmh, USER_MAX_SPEED, VEHICLE_TYPES } from './vehicle-types';
 import type { OvertakingRules, Vehicle, World, WorldEvent } from './world';
 
 export const LANE_CHANGE_SECONDS = 2;
 export const LANE_CHANGE_STEPS = Math.round(LANE_CHANGE_SECONDS / STEP);
-export const GAP_BEHIND = 2;
-export const GAP_AHEAD = 3;
+export const TRAFFIC_CUT_IN_GAP = 2;
+export const TRAFFIC_RETURN_FOLLOWING_TIME = 3;
 export const ONCOMING_GAP = 6;
 export const PLAN_INTERVAL = 0.5;
 
@@ -24,6 +25,9 @@ const SPEED_BOUND_LOOKAHEAD = 1000;
 const SPEED_ALLOWANCE = 0.3;
 const LATE_FALLBACK_SECONDS = 0.5;
 const FALLBACK_GAP_AHEAD = 1;
+const RETURN_BRAKING = 3;
+const RETURN_BRAKING_STANDSTILL = 2;
+const PULL_OUT_MARGIN = 2;
 const INSERTION_ZONE_AHEAD = 3000;
 const INSERTION_ZONE_BEHIND = 200;
 const INSERTION_ZONE_MARGIN = 500;
@@ -33,6 +37,8 @@ export interface OvertakePlan {
   readonly speed: number;
   readonly end: number;
   readonly limit: number;
+  readonly behindTime: number;
+  readonly aheadTime: number;
   readonly passedIds: readonly number[];
 }
 
@@ -70,9 +76,31 @@ export function acceleratingMotion(start: number, target: number, acceleration: 
 
 export function oncomingLimit(world: World, vehicle: Vehicle): number {
   if (vehicle.kind === 'user') {
-    return world.userGap;
+    return world.userSettings.oncomingGap;
   }
   return ONCOMING_GAP;
+}
+
+export function overtakingSpeed(world: World, vehicle: Vehicle): number {
+  const desired = world.effectiveDesiredSpeed(vehicle);
+  if (vehicle.kind === 'user') {
+    return Math.max(desired, world.userSettings.overtakingSpeed);
+  }
+  return desired;
+}
+
+export function brakingRoom(speed: number, aheadSpeed: number): number {
+  if (speed <= aheadSpeed) {
+    return 0;
+  }
+  return (speed - aheadSpeed) ** 2 / (2 * RETURN_BRAKING) + RETURN_BRAKING_STANDSTILL;
+}
+
+export function returnGaps(world: World, vehicle: Vehicle): { behindTime: number; aheadTime: number } {
+  if (vehicle.kind === 'user') {
+    return { behindTime: world.userSettings.cutInGap, aheadTime: world.userSettings.returnFollowingTime };
+  }
+  return { behindTime: TRAFFIC_CUT_IN_GAP, aheadTime: TRAFFIC_RETURN_FOLLOWING_TIME };
 }
 
 export function maxPossibleSpeed(world: World, vehicle: Vehicle): number {
@@ -106,24 +134,28 @@ export function speedBounds(world: World, vehicle: Vehicle): SpeedBounds {
     chain.push(ahead);
   }
   let high = Infinity;
-  let low = vehicle.speed;
+  let low = lowestSpeed(vehicle, chain[0]);
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     const ahead = chain[index];
     high = Math.max(ahead.speed, Math.min(world.effectiveDesiredSpeed(ahead), high));
-    low = Math.min(low, ahead.speed);
+    low = Math.min(low, lowestSpeed(ahead, chain[index + 1]));
   }
   const own = Math.max(vehicle.speed, Math.min(world.effectiveDesiredSpeed(vehicle), high));
   return { low: Math.max(0, low - SPEED_ALLOWANCE), high: own + SPEED_ALLOWANCE };
 }
 
 export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
-  const speed = world.effectiveDesiredSpeed(car);
+  const speed = overtakingSpeed(world, car);
   const motion = acceleratingMotion(car.speed, speed, car.maxAcceleration);
   const limit = oncomingLimit(world, car);
+  const { behindTime, aheadTime } = returnGaps(world, car);
   if (!oncomingClear(world, car, motion, 2 * LANE_CHANGE_SECONDS, limit)) {
     return null;
   }
   const { entries, complete } = homeQueue(world, car);
+  if (!pullOutClear(world, entries[0], motion)) {
+    return null;
+  }
   for (let index = 0; index < entries.length; index += 1) {
     const passed = entries[index];
     const passedHigh = speedBounds(world, passed.vehicle).high;
@@ -133,7 +165,7 @@ export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
     const clearNeed = passed.distance + car.length + DISTANCE_MARGIN;
     const clearTime = earliestTime((time) => motion.distance(time) - passedHigh * time - clearNeed);
     const gapTime = earliestTime(
-      (time) => motion.distance(time) - passedHigh * time - clearNeed - GAP_BEHIND * passedHigh,
+      (time) => motion.distance(time) - passedHigh * time - clearNeed - behindTime * passedHigh,
     );
     if (clearTime === null || gapTime === null) {
       return null;
@@ -149,7 +181,9 @@ export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
     if (next !== undefined) {
       const nextLow = speedBounds(world, next.vehicle).low;
       const gapAhead = next.distance - next.vehicle.length + nextLow * end - motion.distance(end);
-      if (gapAhead < GAP_AHEAD * motion.speed(end) + DISTANCE_MARGIN) {
+      const speedAtEnd = motion.speed(end);
+      const needed = Math.max(aheadTime * speedAtEnd, brakingRoom(speedAtEnd, nextLow));
+      if (gapAhead < needed + DISTANCE_MARGIN) {
         continue;
       }
     }
@@ -163,6 +197,8 @@ export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
       speed,
       end,
       limit,
+      behindTime,
+      aheadTime,
       passedIds: entries.slice(0, index + 1).map((entry) => entry.vehicle.id),
     };
   }
@@ -184,7 +220,7 @@ export function returnReady(world: World, car: Vehicle): boolean {
     }
     const behindHigh = speedBounds(world, follower.vehicle).high;
     const gapBehind = follower.gap + advance - behindHigh * LANE_CHANGE_SECONDS;
-    let needed = GAP_BEHIND * behindHigh + DISTANCE_MARGIN;
+    let needed = maneuver.behindTime * behindHigh + DISTANCE_MARGIN;
     if (late) {
       needed = DISTANCE_MARGIN;
     }
@@ -196,10 +232,12 @@ export function returnReady(world: World, car: Vehicle): boolean {
   if (leader !== null) {
     const aheadLow = speedBounds(world, leader.vehicle).low;
     const gapAhead = leader.gap + aheadLow * LANE_CHANGE_SECONDS - advance;
-    let needed = GAP_AHEAD * motion.speed(LANE_CHANGE_SECONDS) + DISTANCE_MARGIN;
+    const speedAtEnd = motion.speed(LANE_CHANGE_SECONDS);
+    let timeGap = maneuver.aheadTime;
     if (late) {
-      needed = FALLBACK_GAP_AHEAD * motion.speed(LANE_CHANGE_SECONDS) + DISTANCE_MARGIN;
+      timeGap = FALLBACK_GAP_AHEAD;
     }
+    const needed = Math.max(timeGap * speedAtEnd, brakingRoom(speedAtEnd, aheadLow)) + DISTANCE_MARGIN;
     if (gapAhead < needed) {
       return false;
     }
@@ -271,6 +309,8 @@ export const overtakingRules: OvertakingRules = {
       speed: plan.speed,
       plannedEnd: world.time + plan.end,
       limit: plan.limit,
+      behindTime: plan.behindTime,
+      aheadTime: plan.aheadTime,
       passedIds: plan.passedIds,
       laneChangeSteps: 0,
     };
@@ -325,8 +365,26 @@ function finish(world: World, vehicle: Vehicle, events: WorldEvent[]): void {
     gapAhead,
     timeToMeet: timeToMeetOncoming(world, vehicle),
     limit: maneuver.limit,
+    behindLimit: maneuver.behindTime,
+    aheadLimit: maneuver.aheadTime,
     lateBy: world.time - maneuver.plannedEnd,
   });
+}
+
+function pullOutClear(world: World, ahead: QueueEntry | undefined, motion: Motion): boolean {
+  if (ahead === undefined) {
+    return true;
+  }
+  const aheadLow = speedBounds(world, ahead.vehicle).low;
+  const gapAtEnd = ahead.distance - ahead.vehicle.length + aheadLow * LANE_CHANGE_SECONDS - motion.distance(LANE_CHANGE_SECONDS);
+  return gapAtEnd >= PULL_OUT_MARGIN;
+}
+
+function lowestSpeed(vehicle: Vehicle, leader: Vehicle | undefined): number {
+  if (!vehicle.recovering || leader === undefined) {
+    return vehicle.speed;
+  }
+  return Math.min(vehicle.speed, recoveryTarget(vehicle, { gap: 0, speed: leader.speed }));
 }
 
 function homeQueue(world: World, car: Vehicle): { entries: QueueEntry[]; complete: boolean } {

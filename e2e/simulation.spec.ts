@@ -1,12 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const SLIDERS = [
-  { id: 'my-speed', name: 'My speed', min: '80', max: '180', step: '5', value: '130', shown: '130 km/h' },
-  { id: 'cars', name: 'Cars', min: '0', max: '100', step: '1', value: '15', shown: '15' },
-  { id: 'semis', name: 'Semis', min: '0', max: '20', step: '1', value: '3', shown: '3' },
-  { id: 'slow-trucks', name: 'Slow trucks', min: '0', max: '10', step: '1', value: '2', shown: '2' },
-  { id: 'my-gap', name: 'My overtaking gap', min: '1', max: '6', step: '0.1', value: '6', shown: '6.0 s' },
-  { id: 'simulation-speed', name: 'Simulation speed', min: '1', max: '10', step: '1', value: '1', shown: '1×' },
+  { group: 'Driving', id: 'my-speed', name: 'My speed', min: '80', max: '180', step: '5', value: '130', shown: '130 km/h' },
+  { group: 'Driving', id: 'driving-following', name: 'Following distance', min: '1', max: '5', step: '0.1', value: '3', shown: '3.0 s' },
+  { group: 'Overtaking', id: 'overtaking-speed', name: 'Overtaking speed', min: '80', max: '180', step: '5', value: '130', shown: '130 km/h' },
+  { group: 'Overtaking', id: 'oncoming-gap', name: 'Oncoming traffic gap', min: '1', max: '6', step: '0.1', value: '6', shown: '6.0 s' },
+  { group: 'Overtaking', id: 'overtaking-following', name: 'Following distance', min: '0.5', max: '3', step: '0.1', value: '2', shown: '2.0 s' },
+  { group: 'Overtaking', id: 'cut-in-gap', name: 'Cut-in gap', min: '0.5', max: '3', step: '0.1', value: '2', shown: '2.0 s' },
+  { group: 'Traffic', id: 'cars', name: 'Cars', min: '0', max: '100', step: '1', value: '15', shown: '15' },
+  { group: 'Traffic', id: 'semis', name: 'Semis', min: '0', max: '20', step: '1', value: '3', shown: '3' },
+  { group: 'Traffic', id: 'slow-trucks', name: 'Slow trucks', min: '0', max: '10', step: '1', value: '2', shown: '2' },
+  { group: 'Simulation', id: 'simulation-speed', name: 'Simulation speed', min: '1', max: '10', step: '1', value: '1', shown: '1×' },
 ];
 
 async function openApp(page: Page): Promise<void> {
@@ -20,18 +24,34 @@ function canvasSnapshot(page: Page): Promise<string> {
   return page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => canvas.toDataURL());
 }
 
-test('shows six sliders with their ranges, steps, and defaults', async ({ page }) => {
+test('shows the control groups in order', async ({ page }) => {
   await openApp(page);
-  await expect(page.getByRole('slider')).toHaveCount(6);
+  await expect(page.locator('aside legend')).toHaveText(['Driving', 'Overtaking', 'Traffic', 'Simulation']);
+});
+
+test('shows ten sliders with their groups, ranges, steps, and defaults', async ({ page }) => {
+  await openApp(page);
+  await expect(page.getByRole('slider')).toHaveCount(10);
   for (const slider of SLIDERS) {
-    const input = page.getByRole('slider', { name: slider.name, exact: true });
+    const input = page.getByRole('group', { name: slider.group }).getByRole('slider', { name: slider.name, exact: true });
+    await expect(input).toHaveId(slider.id);
     await expect(input).toHaveValue(slider.value);
     await expect(input).toHaveAttribute('min', slider.min);
     await expect(input).toHaveAttribute('max', slider.max);
     await expect(input).toHaveAttribute('step', slider.step);
     await expect(page.locator(`output[for="${slider.id}"]`)).toHaveText(slider.shown);
   }
-  await expect(page.getByText('Vehicles per direction on 10 km of road.')).toBeVisible();
+  await expect(
+    page.getByRole('group', { name: 'Traffic' }).getByText('Vehicles per direction on 10 km of road.'),
+  ).toBeVisible();
+});
+
+test('has a following distance in the Driving and in the Overtaking group', async ({ page }) => {
+  await openApp(page);
+  const driving = page.getByRole('group', { name: 'Driving' }).getByRole('slider', { name: 'Following distance' });
+  const overtaking = page.getByRole('group', { name: 'Overtaking' }).getByRole('slider', { name: 'Following distance' });
+  await expect(driving).toHaveValue('3');
+  await expect(overtaking).toHaveValue('2');
 });
 
 test('moves my speed in 5 km/h steps', async ({ page }) => {
