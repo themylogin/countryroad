@@ -51,6 +51,7 @@ export interface ControlHandlers {
 export interface Controls {
   readonly panel: HTMLElement;
   updateStats(trip: FormattedTrip): void;
+  updateHoldReason(text: string | null): void;
 }
 
 interface SliderSpec {
@@ -71,6 +72,8 @@ const STAT_LABELS: ReadonlyArray<readonly [keyof FormattedTrip, string]> = [
   ['averageSpeed', 'Average speed'],
   ['overtakes', 'Overtakes completed'],
 ];
+
+const SIMULATION_SPEEDS = [1, 2, 4, 10, 30, 60];
 
 const speedText = (value: number): string => `${value} km/h`;
 const secondsText = (value: number): string => `${value.toFixed(1)} s`;
@@ -199,20 +202,27 @@ export function createControls(handlers: ControlHandlers): Controls {
     stats.append(term, value);
   }
 
+  const holdReason = document.createElement('div');
+  holdReason.className = 'hold-reason';
+  holdReason.hidden = true;
+  const holdReasonText = document.createElement('p');
+  holdReason.append(document.createElement('hr'), holdReasonText);
+
   panel.append(
     createGroup('Simulation', [
       createSlider({
         id: 'simulation-speed',
         label: 'Simulation speed',
-        min: 1,
-        max: 10,
+        min: 0,
+        max: SIMULATION_SPEEDS.length - 1,
         step: 1,
-        value: DEFAULT_SETTINGS.simulationSpeed,
-        format: (value) => `${value}×`,
-        apply: (value) => handlers.setSimulationSpeed(value),
+        value: SIMULATION_SPEEDS.indexOf(DEFAULT_SETTINGS.simulationSpeed),
+        format: (position) => `${SIMULATION_SPEEDS[position]}×`,
+        apply: (position) => handlers.setSimulationSpeed(SIMULATION_SPEEDS[position]),
       }),
       button,
       stats,
+      holdReason,
     ]),
   );
 
@@ -223,6 +233,15 @@ export function createControls(handlers: ControlHandlers): Controls {
         if (element.textContent !== trip[key]) {
           element.textContent = trip[key];
         }
+      }
+    },
+    updateHoldReason(text: string | null): void {
+      const hidden = text === null;
+      if (holdReason.hidden !== hidden) {
+        holdReason.hidden = hidden;
+      }
+      if (text !== null && holdReasonText.textContent !== text) {
+        holdReasonText.textContent = text;
       }
     },
   };
@@ -254,7 +273,8 @@ function createSlider(spec: SliderSpec): HTMLElement {
   label.textContent = spec.label;
   const output = document.createElement('output');
   output.htmlFor.add(spec.id);
-  output.textContent = spec.format(spec.value);
+  const shown = spec.format(spec.value);
+  output.textContent = shown;
   header.append(label, output);
   const input = document.createElement('input');
   input.type = 'range';
@@ -263,9 +283,12 @@ function createSlider(spec: SliderSpec): HTMLElement {
   input.max = String(spec.max);
   input.step = String(spec.step);
   input.value = String(spec.value);
+  input.setAttribute('aria-valuetext', shown);
   input.addEventListener('input', () => {
     const value = Number(input.value);
-    output.textContent = spec.format(value);
+    const text = spec.format(value);
+    output.textContent = text;
+    input.setAttribute('aria-valuetext', text);
     spec.apply(value);
   });
   wrapper.append(header, input);

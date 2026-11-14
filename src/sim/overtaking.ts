@@ -2,7 +2,7 @@ import { STEP } from './clock';
 import { recoveryTarget } from './following';
 import { forwardDistance, ROAD_LENGTH, type Direction } from './road';
 import { kmh, USER_MAX_SPEED, VEHICLE_TYPES } from './vehicle-types';
-import type { OvertakingRules, Vehicle, World, WorldEvent } from './world';
+import type { Neighbor, OvertakingRules, Vehicle, World, WorldEvent } from './world';
 
 export const LANE_CHANGE_SECONDS = 2;
 export const LANE_CHANGE_STEPS = Math.round(LANE_CHANGE_SECONDS / STEP);
@@ -13,9 +13,9 @@ export const PLAN_INTERVAL = 0.5;
 
 const CONSTRAINED_SPEED_MARGIN = kmh(1);
 const CONSTRAINED_GAP_MARGIN = 20;
-const HORIZON_VEHICLES = 12;
+export const HORIZON_VEHICLES = 12;
 const HORIZON_DISTANCE = 3000;
-const MAX_MANEUVER_SECONDS = 90;
+export const MAX_MANEUVER_SECONDS = 90;
 const DISTANCE_MARGIN = 1;
 const TIME_MARGIN = 0.05;
 const PASSING_LANE_AHEAD_MARGIN = 100;
@@ -34,6 +34,29 @@ const INSERTION_ZONE_AHEAD = 3000;
 const INSERTION_ZONE_BEHIND = 200;
 const INSERTION_ZONE_MARGIN = 500;
 const SCAN_STEP = 0.25;
+const MIN_REFERENCE_SPEED = 0.1;
+
+export const HOLD_REASONS = [
+  'oncoming',
+  'laneBusy',
+  'queueTooLong',
+  'noGap',
+  'tooClose',
+  'tooLong',
+  'canReachSpeed',
+  'notSlower',
+] as const;
+
+export type HoldReason = (typeof HOLD_REASONS)[number];
+
+export type Hold =
+  | { readonly reason: 'oncoming' | 'noGap' | 'tooClose'; readonly gap: number; readonly need: number }
+  | { readonly reason: 'tooLong'; readonly speed: number }
+  | { readonly reason: 'laneBusy' | 'queueTooLong' | 'canReachSpeed' | 'notSlower' };
+
+export type OvertakeDecision =
+  | { readonly kind: 'plan'; readonly plan: OvertakePlan }
+  | { readonly kind: 'hold'; readonly hold: Hold | null };
 
 export interface OvertakePlan {
   readonly speed: number;
@@ -112,16 +135,44 @@ export function maxPossibleSpeed(world: World, vehicle: Vehicle): number {
   return world.effectiveDesiredSpeed(vehicle);
 }
 
-export function isConstrained(world: World, vehicle: Vehicle): boolean {
+export function followedLeader(world: World, vehicle: Vehicle): Neighbor | null {
   const leader = world.homeLaneLeader(vehicle);
-  if (leader === null) {
-    return false;
+  if (leader === null || leader.gap > vehicle.followingTime * vehicle.speed + CONSTRAINED_GAP_MARGIN) {
+    return null;
   }
-  const desired = world.effectiveDesiredSpeed(vehicle);
-  if (leader.vehicle.speed >= desired - CONSTRAINED_SPEED_MARGIN) {
-    return false;
+  return leader;
+}
+
+function holdsBack(world: World, vehicle: Vehicle, leader: Vehicle): boolean {
+  return leader.speed < world.effectiveDesiredSpeed(vehicle) - CONSTRAINED_SPEED_MARGIN;
+}
+
+export function isConstrained(world: World, vehicle: Vehicle): boolean {
+  const leader = followedLeader(world, vehicle);
+  return leader !== null && holdsBack(world, vehicle, leader.vehicle);
+}
+
+export function strongerHold(current: Hold | null, candidate: Hold | null): Hold | null {
+  if (current === null) {
+    return candidate;
   }
-  return leader.gap <= vehicle.followingTime * vehicle.speed + CONSTRAINED_GAP_MARGIN;
+  if (candidate === null) {
+    return current;
+  }
+  const order = HOLD_REASONS.indexOf(candidate.reason) - HOLD_REASONS.indexOf(current.reason);
+  if (order < 0) {
+    return candidate;
+  }
+  if (order > 0) {
+    return current;
+  }
+  if (candidate.reason === 'tooLong' && current.reason === 'tooLong' && candidate.speed > current.speed) {
+    return candidate;
+  }
+  if ('gap' in candidate && 'gap' in current && candidate.need - candidate.gap < current.need - current.gap) {
+    return candidate;
+  }
+  return current;
 }
 
 export function speedBounds(world: World, vehicle: Vehicle): SpeedBounds {
@@ -172,9 +223,7 @@ interface PlanContext {
 
 type SlotResult =
   | { readonly kind: 'plan'; readonly plan: OvertakePlan }
-  | { readonly kind: 'cannotPass' }
-  | { readonly kind: 'noFit' }
-  | { readonly kind: 'blocked' };
+  | { readonly kind: 'cannotPass' | 'noFit' | 'blocked'; readonly hold: Hold | null };
 
 export function queueEnd(world: World, entries: readonly QueueEntry[]): number {
   let end = 0;
@@ -192,11 +241,11 @@ export function queueEnd(world: World, entries: readonly QueueEntry[]): number {
   return end;
 }
 
-export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
+export function planOvertake(world: World, car: Vehicle): OvertakeDecision {
   const { entries, complete } = homeQueue(world, car);
   const first = entries[0];
   if (first === undefined) {
-    return null;
+    return { kind: 'hold', hold: null };
   }
   const context: PlanContext = {
     highest: overtakingSpeed(world, car),
@@ -208,31 +257,48 @@ export function planOvertake(world: World, car: Vehicle): OvertakePlan | null {
   const firstCandidates = candidateSpeeds(car, context.highest, speedBounds(world, first.vehicle).high);
   const slowest = firstCandidates[firstCandidates.length - 1];
   if (slowest === undefined) {
-    return null;
+    return { kind: 'hold', hold: { reason: 'canReachSpeed' } };
   }
   const slowestMotion = acceleratingMotion(car.speed, slowest, car.maxAcceleration);
-  if (!oncomingClear(world, car, slowestMotion, 2 * LANE_CHANGE_SECONDS, context.limit)) {
-    return null;
+  const early = oncomingConflict(world, car, slowestMotion, 2 * LANE_CHANGE_SECONDS, context.limit);
+  if (early !== null) {
+    const earlyHold: Hold = { reason: 'oncoming', gap: early.gap, need: early.need };
+    if (car.kind !== 'user') {
+      return { kind: 'hold', hold: earlyHold };
+    }
+    const slots = planUserSlots(world, car, context);
+    if (slots.kind === 'hold' && slots.hold?.reason === 'oncoming') {
+      return slots;
+    }
+    return { kind: 'hold', hold: earlyHold };
   }
   if (car.kind === 'user') {
-    for (let index = queueEnd(world, entries); index >= 0; index -= 1) {
-      const result = planSlot(world, car, context, index);
-      if (result.kind === 'plan') {
-        return result.plan;
-      }
-    }
-    return null;
+    return planUserSlots(world, car, context);
   }
+  let hold: Hold | null = null;
   for (let index = 0; index < entries.length; index += 1) {
     const result = planSlot(world, car, context, index);
     if (result.kind === 'plan') {
-      return result.plan;
+      return result;
     }
+    hold = strongerHold(hold, result.hold);
     if (result.kind !== 'noFit') {
-      return null;
+      return { kind: 'hold', hold };
     }
   }
-  return null;
+  return { kind: 'hold', hold };
+}
+
+function planUserSlots(world: World, car: Vehicle, context: PlanContext): OvertakeDecision {
+  let hold: Hold | null = null;
+  for (let index = queueEnd(world, context.entries); index >= 0; index -= 1) {
+    const result = planSlot(world, car, context, index);
+    if (result.kind === 'plan') {
+      return result;
+    }
+    hold = strongerHold(hold, result.hold);
+  }
+  return { kind: 'hold', hold };
 }
 
 function planSlot(world: World, car: Vehicle, context: PlanContext, index: number): SlotResult {
@@ -241,23 +307,28 @@ function planSlot(world: World, car: Vehicle, context: PlanContext, index: numbe
   const passedHigh = speedBounds(world, passed.vehicle).high;
   const candidates = candidateSpeeds(car, highest, passedHigh);
   if (candidates.length === 0) {
-    return { kind: 'cannotPass' };
+    return { kind: 'cannotPass', hold: { reason: 'canReachSpeed' } };
   }
   const next = entries[index + 1];
   if (next === undefined && !complete) {
-    return { kind: 'blocked' };
+    return { kind: 'blocked', hold: { reason: 'queueTooLong' } };
   }
   let nextLow = 0;
   if (next !== undefined) {
     nextLow = speedBounds(world, next.vehicle).low;
   }
+  let hold: Hold | null = null;
   for (const speed of candidates) {
     const motion = acceleratingMotion(car.speed, speed, car.maxAcceleration);
-    if (!pullOutClear(world, entries[0], motion)) {
+    const room = pullOutRoom(world, entries[0], motion);
+    if (room < PULL_OUT_MARGIN) {
+      const gap = entries[0].distance - entries[0].vehicle.length;
+      hold = strongerHold(hold, { reason: 'tooClose', gap, need: gap - room + PULL_OUT_MARGIN });
       continue;
     }
     const end = returnEnd(car, passed, passedHigh, behindTime, motion);
     if (end === null) {
+      hold = strongerHold(hold, { reason: 'tooLong', speed });
       continue;
     }
     if (next !== undefined) {
@@ -265,14 +336,18 @@ function planSlot(world: World, car: Vehicle, context: PlanContext, index: numbe
       const speedAtEnd = motion.speed(end);
       const needed = Math.max(aheadTime * speedAtEnd, brakingRoom(speedAtEnd, nextLow));
       if (gapAhead < needed + DISTANCE_MARGIN) {
+        const space = next.distance - next.vehicle.length - passed.distance;
+        const reference = Math.max(passed.vehicle.speed, MIN_REFERENCE_SPEED);
+        hold = strongerHold(hold, { reason: 'noGap', gap: Math.max(0, space) / reference, need: (space + needed - gapAhead) / reference });
         continue;
       }
     }
     if (!passingLaneFree(world, car, motion.distance(end), end)) {
-      return { kind: 'blocked' };
+      return { kind: 'blocked', hold: { reason: 'laneBusy' } };
     }
-    if (!oncomingClear(world, car, motion, end, limit)) {
-      return { kind: 'blocked' };
+    const conflict = oncomingConflict(world, car, motion, end, limit);
+    if (conflict !== null) {
+      return { kind: 'blocked', hold: { reason: 'oncoming', gap: conflict.gap, need: conflict.need } };
     }
     return {
       kind: 'plan',
@@ -286,7 +361,7 @@ function planSlot(world: World, car: Vehicle, context: PlanContext, index: numbe
       },
     };
   }
-  return { kind: 'noFit' };
+  return { kind: 'noFit', hold };
 }
 
 function returnEnd(car: Vehicle, passed: QueueEntry, passedHigh: number, behindTime: number, motion: Motion): number | null {
@@ -399,13 +474,22 @@ export const overtakingRules: OvertakingRules = {
       return;
     }
     vehicle.nextPlanTime = world.time + PLAN_INTERVAL;
-    if (!isConstrained(world, vehicle)) {
+    const leader = followedLeader(world, vehicle);
+    if (leader === null) {
+      vehicle.hold = null;
       return;
     }
-    const plan = planOvertake(world, vehicle);
-    if (plan === null) {
+    if (!holdsBack(world, vehicle, leader.vehicle)) {
+      vehicle.hold = { reason: 'notSlower' };
       return;
     }
+    const decision = planOvertake(world, vehicle);
+    if (decision.kind === 'hold') {
+      vehicle.hold = decision.hold;
+      return;
+    }
+    vehicle.hold = null;
+    const plan = decision.plan;
     vehicle.maneuver = {
       speed: plan.speed,
       plannedEnd: world.time + plan.end,
@@ -481,13 +565,12 @@ function hasPassed(world: World, car: Vehicle, vehicleId: number): boolean {
   return forwardDistance(car.y, vehicle.y, car.direction) > ROAD_LENGTH / 2;
 }
 
-function pullOutClear(world: World, ahead: QueueEntry | undefined, motion: Motion): boolean {
+function pullOutRoom(world: World, ahead: QueueEntry | undefined, motion: Motion): number {
   if (ahead === undefined) {
-    return true;
+    return Infinity;
   }
   const aheadLow = speedBounds(world, ahead.vehicle).low;
-  const gapAtEnd = ahead.distance - ahead.vehicle.length + aheadLow * LANE_CHANGE_SECONDS - motion.distance(LANE_CHANGE_SECONDS);
-  return gapAtEnd >= PULL_OUT_MARGIN;
+  return ahead.distance - ahead.vehicle.length + aheadLow * LANE_CHANGE_SECONDS - motion.distance(LANE_CHANGE_SECONDS);
 }
 
 function lowestSpeed(vehicle: Vehicle, leader: Vehicle | undefined): number {
@@ -534,21 +617,33 @@ function passingLaneFree(world: World, car: Vehicle, reach: number, end: number)
   return true;
 }
 
-function oncomingClear(world: World, car: Vehicle, motion: Motion, end: number, limit: number): boolean {
+interface OncomingConflict {
+  readonly gap: number;
+  readonly need: number;
+}
+
+function oncomingConflict(world: World, car: Vehicle, motion: Motion, end: number, limit: number): OncomingConflict | null {
   const travelled = motion.distance(end);
   const speedAtEnd = motion.speed(end);
+  let worst: OncomingConflict | null = null;
   for (const oncoming of world.opposite(car.direction)) {
     const distance = forwardDistance(car.y, oncoming.y, car.direction);
-    if (ROAD_LENGTH - distance < oncoming.length + car.length + ALONGSIDE_MARGIN) {
-      return false;
-    }
+    const alongside = ROAD_LENGTH - distance < oncoming.length + car.length + ALONGSIDE_MARGIN;
     const oncomingSpeed = maxPossibleSpeed(world, oncoming);
     const gapAtEnd = distance - travelled - oncomingSpeed * end;
-    if (gapAtEnd / (speedAtEnd + oncomingSpeed) < limit + TIME_MARGIN) {
-      return false;
+    if (!alongside && gapAtEnd / (speedAtEnd + oncomingSpeed) >= limit + TIME_MARGIN) {
+      continue;
+    }
+    let gap = distance;
+    if (alongside) {
+      gap = 0;
+    }
+    const need = travelled + oncomingSpeed * end + limit * (speedAtEnd + oncomingSpeed);
+    if (worst === null || need - gap > worst.need - worst.gap) {
+      worst = { gap, need };
     }
   }
-  return true;
+  return worst;
 }
 
 function earliestTime(condition: (time: number) => number): number | null {

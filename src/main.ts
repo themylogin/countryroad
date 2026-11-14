@@ -1,6 +1,7 @@
 import './style.css';
 import { STEP, World } from './sim/world';
 import { createControls, DEFAULT_SETTINGS, PANEL_WIDTH, userSettingsFrom } from './ui/controls';
+import { holdText } from './ui/hold-reason';
 import { formatTrip } from './ui/trip-stats';
 import { FrameClock } from './view/frame-clock';
 import { Renderer } from './view/renderer';
@@ -48,6 +49,12 @@ function refreshStats(): void {
       overtakes: world.userOvertakes,
     }),
   );
+  const hold = world.user.hold;
+  let reason: string | null = null;
+  if (hold !== null) {
+    reason = holdText(hold);
+  }
+  controls.updateHoldReason(reason);
 }
 
 function layout(): void {

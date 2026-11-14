@@ -231,9 +231,9 @@ describe('user car', () => {
         continue;
       }
       world.setUser({ oncomingGap: 6 });
-      const careful = planOvertake(world, world.user) !== null;
+      const careful = planOvertake(world, world.user).kind === 'plan';
       world.setUser({ oncomingGap: 1 });
-      const bold = planOvertake(world, world.user) !== null;
+      const bold = planOvertake(world, world.user).kind === 'plan';
       world.setUser({ oncomingGap: 6 });
       if (careful && !bold) {
         onlyAtSix += 1;

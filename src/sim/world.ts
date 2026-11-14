@@ -1,6 +1,6 @@
 import { STEP } from './clock';
 import { followingAcceleration, nextRecovering, nextSpeed, recoveryAcceleration } from './following';
-import { overtakingRules } from './overtaking';
+import { overtakingRules, type Hold } from './overtaking';
 import { createRandom, type Random } from './random';
 import { forwardDistance, relativePosition, ROAD_LENGTH, wrap, type Direction } from './road';
 import { kmh, TRAFFIC_KINDS, VEHICLE_TYPES, type TrafficKind, type VehicleKind } from './vehicle-types';
@@ -45,6 +45,7 @@ export interface Vehicle {
   maneuver: Maneuver | null;
   nextPlanTime: number;
   recovering: boolean;
+  hold: Hold | null;
 }
 
 export type TrafficCounts = Record<TrafficKind, number>;
@@ -328,6 +329,7 @@ export class World {
       maneuver: null,
       nextPlanTime: this.random() * 0.5,
       recovering: false,
+      hold: null,
     };
     this.nextId += 1;
     this.vehicles.push(vehicle);

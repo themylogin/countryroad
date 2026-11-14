@@ -47,12 +47,14 @@ Controls, to the right of the road, in four groups:
   - **Semis:** 0–20 per direction. The default is 3.
   - **Slow trucks:** 0–10 per direction. The default is 2.
 - **Simulation:**
-  - **Simulation speed:** 1× to 10×. The view always draws 60 frames per second.
+  - **Simulation speed:** 1×, 2×, 4×, 10×, 30×, or 60×. The view always draws 60 frames per second.
   - **Start / Pause:** the simulation starts paused.
 
 A change of "My speed" waits while an overtake involves your car. The overtaking sliders apply from your car's next overtake.
 
 Trip statistics, below the Start / Pause button, cover your car from page load: **Current speed**, **Distance**, **Time** (simulated time), **Average speed**, and **Overtakes completed**. They stop while the simulation is paused.
+
+Below the statistics, a horizontal rule and one sentence explain why your car does not overtake. They show only while your car follows a vehicle and does not overtake. Your car follows a vehicle when that vehicle is within your "Driving" following distance plus 20 m. The sentence comes from your car's latest overtake decision, every 0.5 s of simulated time. Some sentences show the current or predicted gap and the gap needed, for example "Oncoming 800 m away, need 1120 m" The needed distance covers your travel during the overtake, the oncoming travel in the same time, and your "Oncoming traffic gap" at the end. The oncoming car can be beyond the visible road. Other sentences name a fixed limit of the planner: 12 vehicles in a queue, or 90 s for one overtake.
 
 ## Requirements
 

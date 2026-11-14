@@ -47,18 +47,24 @@ describe('frame rate', () => {
     expect(totals.renders).toBeLessThanOrEqual(605);
   });
 
-  it('still renders 60 frames per second at 10x', () => {
-    const totals = drive(runningClock(10), 120, 10);
+  it('still renders 60 frames per second at 60x', () => {
+    const totals = drive(runningClock(60), 120, 10);
     expect(totals.renders).toBeGreaterThanOrEqual(599);
     expect(totals.renders).toBeLessThanOrEqual(602);
   });
 });
 
 describe('simulated time', () => {
-  it('passes 30 s ± 0.5 s of simulated time in 10 s of real time at 3x', () => {
-    const totals = drive(runningClock(3), 60, 10);
-    expect(totals.simSeconds).toBeGreaterThanOrEqual(29.5);
-    expect(totals.simSeconds).toBeLessThanOrEqual(30.5);
+  it('passes 40 s ± 0.5 s of simulated time in 10 s of real time at 4x', () => {
+    const totals = drive(runningClock(4), 60, 10);
+    expect(totals.simSeconds).toBeGreaterThanOrEqual(39.5);
+    expect(totals.simSeconds).toBeLessThanOrEqual(40.5);
+  });
+
+  it('passes 600 s ± 1 s of simulated time in 10 s of real time at 60x', () => {
+    const totals = drive(runningClock(60), 60, 10);
+    expect(totals.simSeconds).toBeGreaterThanOrEqual(599);
+    expect(totals.simSeconds).toBeLessThanOrEqual(601);
   });
 
   it('passes 100 s of simulated time in 10 s of real time at 10x on a 144 Hz display', () => {

@@ -64,9 +64,9 @@ The view SHALL redraw 60 times per second while the page is visible, on displays
 - **THEN** the view redraws 60 times per second, not 120
 
 #### Scenario: High simulation speed
-- **WHEN** the simulation speed is 10×
+- **WHEN** the simulation speed is 60×
 - **THEN** the view still redraws 60 times per second
-- **AND** each frame advances the simulation by 10 times the real time since the previous frame
+- **AND** each frame advances the simulation by 60 times the real time since the previous frame
 
 #### Scenario: Paused
 - **WHEN** the simulation is paused

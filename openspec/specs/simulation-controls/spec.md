@@ -29,7 +29,8 @@ The sliders SHALL have these groups, ranges, steps, and defaults:
 | Traffic | Cars | 0–100 | 1 | 15 |
 | Traffic | Semis | 0–20 | 1 | 3 |
 | Traffic | Slow trucks | 0–10 | 1 | 2 |
-| Simulation | Simulation speed | 1×–10× | 1× | 1× |
+
+The "Simulation" group SHALL hold the "Simulation speed" slider, with the positions that the "Simulation speed positions" requirement defines.
 
 #### Scenario: Defaults on load
 - **WHEN** the page loads
@@ -93,9 +94,18 @@ A slider change SHALL take effect at once, while the simulation runs and while i
 - **THEN** the running overtake keeps its old values
 - **AND** the next overtake decision of the user's car uses the new values
 
-### Requirement: Simulation speed
-At a simulation speed of N×, simulated time SHALL pass N times as fast as real time.
+### Requirement: Simulation speed positions
+The "Simulation speed" slider SHALL have six positions, from left to right: 1×, 2×, 4×, 10×, 30×, and 60×. One slider step SHALL move one position. The default SHALL be 1×. Assistive technology SHALL announce the shown factor, not the position number. At a simulation speed of N×, simulated time SHALL pass N times as fast as real time.
 
-#### Scenario: Three times as fast
-- **WHEN** the simulation speed is 3× and the simulation runs for 10 s of real time
-- **THEN** 30 s ± 0.5 s of simulated time pass
+#### Scenario: Positions in order
+- **WHEN** the user moves the "Simulation speed" slider one step at a time from 1× to the right
+- **THEN** the slider shows 2×, 4×, 10×, 30×, and 60× in this order
+- **AND** a further step right keeps 60×
+
+#### Scenario: Four times as fast
+- **WHEN** the simulation speed is 4× and the simulation runs for 10 s of real time
+- **THEN** 40 s ± 0.5 s of simulated time pass
+
+#### Scenario: Sixty times as fast
+- **WHEN** the simulation speed is 60× and the simulation runs for 10 s of real time
+- **THEN** 600 s ± 1 s of simulated time pass

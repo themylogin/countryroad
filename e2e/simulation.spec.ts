@@ -10,7 +10,7 @@ const SLIDERS = [
   { group: 'Traffic', id: 'cars', name: 'Cars', min: '0', max: '100', step: '1', value: '15', shown: '15' },
   { group: 'Traffic', id: 'semis', name: 'Semis', min: '0', max: '20', step: '1', value: '3', shown: '3' },
   { group: 'Traffic', id: 'slow-trucks', name: 'Slow trucks', min: '0', max: '10', step: '1', value: '2', shown: '2' },
-  { group: 'Simulation', id: 'simulation-speed', name: 'Simulation speed', min: '1', max: '10', step: '1', value: '1', shown: '1×' },
+  { group: 'Simulation', id: 'simulation-speed', name: 'Simulation speed', min: '0', max: '5', step: '1', value: '0', shown: '1×' },
 ];
 
 async function openApp(page: Page): Promise<void> {
@@ -39,6 +39,7 @@ test('shows ten sliders with their groups, ranges, steps, and defaults', async (
     await expect(input).toHaveAttribute('min', slider.min);
     await expect(input).toHaveAttribute('max', slider.max);
     await expect(input).toHaveAttribute('step', slider.step);
+    await expect(input).toHaveAttribute('aria-valuetext', slider.shown);
     await expect(page.locator(`output[for="${slider.id}"]`)).toHaveText(slider.shown);
   }
   await expect(
@@ -61,6 +62,18 @@ test('moves my speed in 5 km/h steps', async ({ page }) => {
   await page.keyboard.press('ArrowRight');
   await expect(speed).toHaveValue('135');
   await expect(page.locator('output[for="my-speed"]')).toHaveText('135 km/h');
+});
+
+test('steps the simulation speed through its six positions', async ({ page }) => {
+  await openApp(page);
+  const slider = page.getByRole('slider', { name: 'Simulation speed' });
+  const output = page.locator('output[for="simulation-speed"]');
+  await slider.focus();
+  for (const shown of ['2×', '4×', '10×', '30×', '60×', '60×']) {
+    await page.keyboard.press('ArrowRight');
+    await expect(output).toHaveText(shown);
+    await expect(slider).toHaveAttribute('aria-valuetext', shown);
+  }
 });
 
 test('places the control panel to the right of the road', async ({ page }) => {

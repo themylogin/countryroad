@@ -25,8 +25,8 @@ Current speed and average speed SHALL show whole km/h. Distance SHALL show km wi
 The statistics SHALL count from page load. Distance SHALL be the distance that the user's car drove. Time SHALL be the simulated time. While the simulation is paused, no statistic SHALL change. An overtake SHALL count when the user's car finishes its return lane change.
 
 #### Scenario: Time follows the simulation speed
-- **WHEN** the simulation runs at 3× for 10 s of real time from page load
-- **THEN** the time shows 0:00:29, 0:00:30, or 0:00:31
+- **WHEN** the simulation runs at 4× for 10 s of real time from page load
+- **THEN** the time shows 0:00:39, 0:00:40, or 0:00:41
 
 #### Scenario: Paused statistics
 - **WHEN** the user presses "Pause"

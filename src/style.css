@@ -116,3 +116,14 @@ body {
   font-weight: 600;
   text-align: right;
 }
+
+.hold-reason hr {
+  margin: 10px 0 8px;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.hold-reason p {
+  margin: 0;
+  color: #c4c4c4;
+}
